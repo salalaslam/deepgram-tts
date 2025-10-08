@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Deepgram TTS - Approach 1 (Proxied)</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            padding: 40px;
+            max-width: 600px;
+            width: 100%;
+        }
+
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 28px;
+        }
+
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 14px;
+        }
+
+        .status {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 20px;
+            padding: 12px;
+            background: #f5f5f5;
+            border-radius: 8px;
+        }
+
+        .status-indicator {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #e74c3c;
+            animation: pulse 2s infinite;
+        }
+
+        .status-indicator.connected {
+            background: #2ecc71;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .input-group {
+            margin-bottom: 20px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: #555;
+            font-weight: 600;
+        }
+
+        textarea {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #ddd;
+            border-radius: 8px;
+            font-size: 16px;
+            font-family: inherit;
+            resize: vertical;
+            min-height: 100px;
+            transition: border-color 0.3s;
+        }
+
+        textarea:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .button-group {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        button {
+            flex: 1;
+            padding: 14px 20px;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+        }
+
+        button:active {
+            transform: translateY(0);
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .btn-secondary {
+            background: #95a5a6;
+            color: white;
+        }
+
+        .btn-danger {
+            background: #e74c3c;
+            color: white;
+        }
+
+        .logs {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 15px;
+            border-radius: 8px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .log-entry {
+            margin-bottom: 5px;
+            padding: 3px 0;
+        }
+
+        .log-entry.info {
+            color: #4ec9b0;
+        }
+
+        .log-entry.error {
+            color: #f48771;
+        }
+
+        .log-entry.success {
+            color: #89d185;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎙️ Deepgram TTS Streaming</h1>
+        <p class="subtitle">Approach 1: Proxied Audio via Python Backend</p>
+
+        <div class="status">
+            <div class="status-indicator" id="statusIndicator"></div>
+            <span id="statusText">Disconnected</span>
+        </div>
+
+        <div class="input-group">
+            <label for="textInput">Enter text to convert to speech:</label>
+            <textarea
+                id="textInput"
+                placeholder="Type something here..."
+            >Hello! This is a test of Deepgram's text-to-speech streaming API.</textarea>
+        </div>
+
+        <div class="button-group">
+            <button id="connectBtn" class="btn-primary" onclick="connect()">Connect</button>
+            <button id="speakBtn" class="btn-primary" onclick="speak()" disabled>Speak</button>
+            <button id="stopBtn" class="btn-danger" onclick="stop()" disabled>Stop</button>
+        </div>
+
+        <div class="input-group">
+            <label>Activity Log:</label>
+            <div class="logs" id="logs"></div>
+        </div>
+    </div>
+
+    <script>
+        let ws = null;
+        let audioContext = null;
+        let audioQueue = [];
+        let isPlaying = false;
+        let nextStartTime = 0;
+
+        // UI Elements
+        const statusIndicator = document.getElementById('statusIndicator');
+        const statusText = document.getElementById('statusText');
+        const connectBtn = document.getElementById('connectBtn');
+        const speakBtn = document.getElementById('speakBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const textInput = document.getElementById('textInput');
+        const logs = document.getElementById('logs');
+
+        function log(message, type = 'info') {
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${type}`;
+            entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            logs.appendChild(entry);
+            logs.scrollTop = logs.scrollHeight;
+        }
+
+        function updateStatus(connected) {
+            if (connected) {
+                statusIndicator.classList.add('connected');
+                statusText.textContent = 'Connected';
+                connectBtn.textContent = 'Disconnect';
+                connectBtn.className = 'btn-secondary';
+                speakBtn.disabled = false;
+            } else {
+                statusIndicator.classList.remove('connected');
+                statusText.textContent = 'Disconnected';
+                connectBtn.textContent = 'Connect';
+                connectBtn.className = 'btn-primary';
+                speakBtn.disabled = true;
+                stopBtn.disabled = true;
+            }
+        }
+
+        async function initAudioContext() {
+            if (!audioContext) {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                    sampleRate: 24000  // Match Deepgram's sample rate
+                });
+                log('Audio context initialized', 'success');
+            }
+
+            // Resume audio context if suspended (browser autoplay policy)
+            if (audioContext.state === 'suspended') {
+                await audioContext.resume();
+            }
+        }
+
+        function playAudioChunk(audioData) {
+            // Convert binary data to audio buffer
+            const audioBuffer = audioContext.createBuffer(
+                1,  // mono
+                audioData.length / 2,  // 16-bit = 2 bytes per sample
+                24000  // sample rate
+            );
+
+            const channelData = audioBuffer.getChannelData(0);
+            const dataView = new DataView(audioData.buffer);
+
+            // Convert 16-bit PCM to float32 [-1, 1]
+            for (let i = 0; i < audioData.length / 2; i++) {
+                const int16 = dataView.getInt16(i * 2, true);  // little-endian
+                channelData[i] = int16 / 32768.0;
+            }
+
+            // Create source and schedule playback
+            const source = audioContext.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(audioContext.destination);
+
+            // Schedule this chunk to play after the previous one
+            const startTime = Math.max(audioContext.currentTime, nextStartTime);
+            source.start(startTime);
+
+            // Update next start time
+            nextStartTime = startTime + audioBuffer.duration;
+
+            log(`Playing audio chunk (${audioData.length} bytes)`, 'info');
+        }
+
+        function connect() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                disconnect();
+                return;
+            }
+
+            log('Connecting to server...', 'info');
+            ws = new WebSocket('ws://localhost:8000/ws');
+            ws.binaryType = 'arraybuffer';
+
+            ws.onopen = async function() {
+                log('Connected to server', 'success');
+                updateStatus(true);
+                await initAudioContext();
+            };
+
+            ws.onmessage = function(event) {
+                if (event.data instanceof ArrayBuffer) {
+                    // Received binary audio data
+                    const audioData = new Uint8Array(event.data);
+                    playAudioChunk(audioData);
+                } else {
+                    // Received text message
+                    log(`Server: ${event.data}`, 'info');
+                }
+            };
+
+            ws.onclose = function() {
+                log('Disconnected from server', 'error');
+                updateStatus(false);
+                ws = null;
+            };
+
+            ws.onerror = function(error) {
+                log('WebSocket error occurred', 'error');
+                console.error('WebSocket error:', error);
+            };
+        }
+
+        function disconnect() {
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+            stop();
+        }
+
+        function speak() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                log('Not connected to server', 'error');
+                return;
+            }
+
+            const text = textInput.value.trim();
+            if (!text) {
+                log('Please enter some text', 'error');
+                return;
+            }
+
+            log(`Sending text: "${text}"`, 'info');
+            ws.send(text);
+
+            speakBtn.disabled = true;
+            stopBtn.disabled = false;
+
+            // Reset audio timing
+            nextStartTime = audioContext.currentTime;
+        }
+
+        function stop() {
+            if (audioContext) {
+                // Stop all audio by closing and recreating the context
+                audioContext.close();
+                audioContext = null;
+                nextStartTime = 0;
+                log('Audio stopped', 'info');
+            }
+
+            speakBtn.disabled = false;
+            stopBtn.disabled = true;
+        }
+
+        // Enable speak button on Enter key
+        textInput.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' && e.ctrlKey) {
+                e.preventDefault();
+                if (!speakBtn.disabled) {
+                    speak();
+                }
+            }
+        });
+
+        // Initial log
+        log('Ready to connect', 'info');
+    </script>
+</body>
+</html>

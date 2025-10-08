@@ -5,7 +5,8 @@ Browser -> Python Backend -> Deepgram -> Python Backend -> Browser
 """
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 import uvicorn
 import logging
 import asyncio
@@ -30,74 +31,8 @@ app = FastAPI()
 
 @app.get("/")
 async def get():
-    """Serve a simple test page"""
-    return HTMLResponse("""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>WebSocket Test</title>
-        </head>
-        <body>
-            <h1>WebSocket Connection Test</h1>
-            <div id="status">Disconnected</div>
-            <button onclick="connect()">Connect</button>
-            <button onclick="disconnect()">Disconnect</button>
-            <button onclick="sendMessage()">Send Test Message</button>
-            <div id="messages"></div>
-
-            <script>
-                let ws = null;
-
-                function connect() {
-                    ws = new WebSocket('ws://localhost:8000/ws');
-
-                    ws.onopen = function(event) {
-                        document.getElementById('status').textContent = 'Connected';
-                        document.getElementById('status').style.color = 'green';
-                        addMessage('Connected to server');
-                    };
-
-                    ws.onmessage = function(event) {
-                        addMessage('Server: ' + event.data);
-                    };
-
-                    ws.onclose = function(event) {
-                        document.getElementById('status').textContent = 'Disconnected';
-                        document.getElementById('status').style.color = 'red';
-                        addMessage('Disconnected from server');
-                    };
-
-                    ws.onerror = function(error) {
-                        addMessage('Error: ' + error);
-                    };
-                }
-
-                function disconnect() {
-                    if (ws) {
-                        ws.close();
-                        ws = null;
-                    }
-                }
-
-                function sendMessage() {
-                    if (ws && ws.readyState === WebSocket.OPEN) {
-                        ws.send('Hello from browser!');
-                        addMessage('You: Hello from browser!');
-                    } else {
-                        addMessage('Not connected!');
-                    }
-                }
-
-                function addMessage(message) {
-                    const messagesDiv = document.getElementById('messages');
-                    const messageElement = document.createElement('div');
-                    messageElement.textContent = message;
-                    messagesDiv.appendChild(messageElement);
-                }
-            </script>
-        </body>
-        </html>
-    """)
+    """Serve the main HTML file"""
+    return FileResponse("index.html")
 
 
 @app.websocket("/ws")
@@ -113,28 +48,42 @@ async def websocket_endpoint(websocket: WebSocket):
     logger.info("Client connected")
 
     dg_connection = None
+    audio_queue = asyncio.Queue()
+    is_connected = True
+
+    async def audio_sender():
+        """Background task to send audio chunks to browser"""
+        try:
+            while is_connected:
+                try:
+                    data = await asyncio.wait_for(audio_queue.get(), timeout=0.1)
+                    await websocket.send_bytes(data)
+                    logger.debug(f"Sent {len(data)} bytes to browser")
+                except asyncio.TimeoutError:
+                    continue
+                except Exception as e:
+                    logger.error(f"Error in audio_sender: {e}")
+                    break
+        except Exception as e:
+            logger.error(f"Audio sender task error: {e}")
 
     try:
-        # Initialize Deepgram client
-        deepgram = DeepgramClient(DEEPGRAM_API_KEY)
+        # Initialize Deepgram client (SDK 5.0+ reads API key from environment)
+        deepgram = DeepgramClient()
         dg_connection = deepgram.speak.websocket.v("1")
-
-        # Flag to track if we're still connected
-        is_connected = True
 
         # Event handlers for Deepgram connection
         def on_open(self, open_event, **kwargs):
             logger.info("Deepgram connection opened")
 
         def on_binary_data(self, data, **kwargs):
-            """Receive audio chunks from Deepgram and send to browser"""
+            """Receive audio chunks from Deepgram and queue them for sending"""
             if is_connected:
                 try:
-                    # Send binary audio data to browser
-                    asyncio.create_task(websocket.send_bytes(data))
-                    logger.debug(f"Relaying {len(data)} bytes to browser")
+                    # Put audio data in queue (non-blocking)
+                    audio_queue.put_nowait(data)
                 except Exception as e:
-                    logger.error(f"Error sending audio to browser: {e}")
+                    logger.error(f"Error queuing audio: {e}")
 
         def on_metadata(self, metadata, **kwargs):
             logger.info(f"Deepgram metadata: {metadata}")
@@ -171,6 +120,9 @@ async def websocket_endpoint(websocket: WebSocket):
 
         logger.info("Deepgram connection started, waiting for text from client...")
 
+        # Start background audio sender task
+        sender_task = asyncio.create_task(audio_sender())
+
         # Wait for text messages from browser
         while True:
             data = await websocket.receive_text()
@@ -190,6 +142,7 @@ async def websocket_endpoint(websocket: WebSocket):
         logger.error(f"Error in websocket_endpoint: {e}")
         is_connected = False
     finally:
+        is_connected = False
         # Clean up Deepgram connection
         if dg_connection:
             try:
