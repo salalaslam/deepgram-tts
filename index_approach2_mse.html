@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Deepgram TTS - Approach 2 MSE</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            padding: 40px;
+            max-width: 600px;
+            width: 100%;
+        }
+
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 28px;
+        }
+
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 14px;
+        }
+
+        .status {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 20px;
+            padding: 12px;
+            background: #f5f5f5;
+            border-radius: 8px;
+        }
+
+        .status-indicator {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #e74c3c;
+            animation: pulse 2s infinite;
+        }
+
+        .status-indicator.connected {
+            background: #2ecc71;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .input-group {
+            margin-bottom: 20px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: #555;
+            font-weight: 600;
+        }
+
+        textarea {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #ddd;
+            border-radius: 8px;
+            font-size: 16px;
+            font-family: inherit;
+            resize: vertical;
+            min-height: 100px;
+            transition: border-color 0.3s;
+        }
+
+        textarea:focus {
+            outline: none;
+            border-color: #43e97b;
+        }
+
+        .button-group {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        button {
+            flex: 1;
+            padding: 14px 20px;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+        }
+
+        button:active {
+            transform: translateY(0);
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%);
+            color: white;
+        }
+
+        .btn-danger {
+            background: #e74c3c;
+            color: white;
+        }
+
+        .logs {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 15px;
+            border-radius: 8px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .log-entry {
+            margin-bottom: 5px;
+            padding: 3px 0;
+        }
+
+        .log-entry.info {
+            color: #4ec9b0;
+        }
+
+        .log-entry.error {
+            color: #f48771;
+        }
+
+        .log-entry.success {
+            color: #89d185;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 600;
+            background: #43e97b;
+            color: white;
+            margin-left: 10px;
+        }
+
+        audio {
+            width: 100%;
+            margin-bottom: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎙️ Deepgram TTS Streaming</h1>
+        <p class="subtitle">
+            Approach 2: Direct Connection (MSE)
+            <span class="badge">MediaSource API</span>
+        </p>
+
+        <div class="status">
+            <div class="status-indicator" id="statusIndicator"></div>
+            <span id="statusText">Disconnected</span>
+        </div>
+
+        <audio id="audioPlayer" controls></audio>
+
+        <div class="input-group">
+            <label for="textInput">Enter text to convert to speech:</label>
+            <textarea
+                id="textInput"
+                placeholder="Type something here..."
+            >Hello! This is a test using MediaSource Extensions for better streaming audio playback.</textarea>
+        </div>
+
+        <div class="button-group">
+            <button id="speakBtn" class="btn-primary" onclick="speak()">Speak</button>
+            <button id="stopBtn" class="btn-danger" onclick="stop()" disabled>Stop</button>
+        </div>
+
+        <div class="input-group">
+            <label>Activity Log:</label>
+            <div class="logs" id="logs"></div>
+        </div>
+    </div>
+
+    <script>
+        let ws = null;
+        let deepgramToken = null;
+        let audioElement = document.getElementById('audioPlayer');
+        let audioChunks = [];
+
+        // UI Elements
+        const statusIndicator = document.getElementById('statusIndicator');
+        const statusText = document.getElementById('statusText');
+        const speakBtn = document.getElementById('speakBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const textInput = document.getElementById('textInput');
+        const logs = document.getElementById('logs');
+
+        function log(message, type = 'info') {
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${type}`;
+            entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            logs.appendChild(entry);
+            logs.scrollTop = logs.scrollHeight;
+        }
+
+        function updateStatus(connected) {
+            if (connected) {
+                statusIndicator.classList.add('connected');
+                statusText.textContent = 'Connected to Deepgram';
+                speakBtn.disabled = true;
+                stopBtn.disabled = false;
+            } else {
+                statusIndicator.classList.remove('connected');
+                statusText.textContent = 'Disconnected';
+                speakBtn.disabled = false;
+                stopBtn.disabled = true;
+            }
+        }
+
+        // Convert PCM to WAV format
+        function pcmToWav(pcmData, sampleRate = 24000) {
+            const numChannels = 1;
+            const bitsPerSample = 16;
+            const bytesPerSample = bitsPerSample / 8;
+            const blockAlign = numChannels * bytesPerSample;
+
+            const dataSize = pcmData.byteLength;
+            const buffer = new ArrayBuffer(44 + dataSize);
+            const view = new DataView(buffer);
+
+            // WAV header
+            const writeString = (offset, string) => {
+                for (let i = 0; i < string.length; i++) {
+                    view.setUint8(offset + i, string.charCodeAt(i));
+                }
+            };
+
+            writeString(0, 'RIFF');
+            view.setUint32(4, 36 + dataSize, true);
+            writeString(8, 'WAVE');
+            writeString(12, 'fmt ');
+            view.setUint32(16, 16, true);
+            view.setUint16(20, 1, true); // PCM
+            view.setUint16(22, numChannels, true);
+            view.setUint32(24, sampleRate, true);
+            view.setUint32(28, sampleRate * blockAlign, true);
+            view.setUint16(32, blockAlign, true);
+            view.setUint16(34, bitsPerSample, true);
+            writeString(36, 'data');
+            view.setUint32(40, dataSize, true);
+
+            // Copy PCM data
+            new Uint8Array(buffer, 44).set(new Uint8Array(pcmData));
+
+            return buffer;
+        }
+
+        function playCollectedAudio() {
+            if (audioChunks.length === 0) {
+                log('No audio data to play', 'error');
+                return;
+            }
+
+            log(`Combining ${audioChunks.length} audio chunks...`, 'info');
+
+            // Combine all PCM chunks
+            const totalLength = audioChunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+            const combinedPcm = new Uint8Array(totalLength);
+            let offset = 0;
+
+            for (const chunk of audioChunks) {
+                combinedPcm.set(new Uint8Array(chunk), offset);
+                offset += chunk.byteLength;
+            }
+
+            // Convert to WAV
+            const wavBuffer = pcmToWav(combinedPcm.buffer, 24000);
+            const blob = new Blob([wavBuffer], { type: 'audio/wav' });
+            const url = URL.createObjectURL(blob);
+
+            // Play the audio
+            audioElement.src = url;
+            audioElement.play().then(() => {
+                log('Playing complete audio', 'success');
+            }).catch(error => {
+                log(`Error playing audio: ${error.message}`, 'error');
+            });
+
+            // Clean up URL after playing
+            audioElement.onended = () => {
+                URL.revokeObjectURL(url);
+                log('Audio playback complete', 'info');
+                updateStatus(false);
+            };
+        }
+
+        async function getToken() {
+            try {
+                log('Fetching token from backend...', 'info');
+                const response = await fetch('http://localhost:8001/api/token');
+
+                if (!response.ok) {
+                    throw new Error('Failed to fetch token');
+                }
+
+                const data = await response.json();
+                deepgramToken = data.token;
+                log('Token retrieved successfully', 'success');
+                return deepgramToken;
+
+            } catch (error) {
+                log(`Error fetching token: ${error.message}`, 'error');
+                throw error;
+            }
+        }
+
+        async function connectToDeepgram(text) {
+            if (!deepgramToken) {
+                await getToken();
+            }
+
+            // Reset audio chunks
+            audioChunks = [];
+
+            // Deepgram WebSocket URL with query parameters
+            const url = new URL('wss://api.deepgram.com/v1/speak');
+            url.searchParams.append('model', 'aura-asteria-en');
+            url.searchParams.append('encoding', 'linear16');
+            url.searchParams.append('sample_rate', '24000');
+
+            log('Connecting directly to Deepgram...', 'info');
+            ws = new WebSocket(url.toString(), ['token', deepgramToken]);
+            ws.binaryType = 'arraybuffer';
+
+            let flushed = false;
+            let closeTimeout = null;
+
+            ws.onopen = async function() {
+                log('Connected directly to Deepgram!', 'success');
+                updateStatus(true);
+
+                // Send the text to Deepgram
+                const message = JSON.stringify({
+                    type: 'Speak',
+                    text: text
+                });
+                ws.send(message);
+                log(`Sent text to Deepgram: "${text}"`, 'info');
+
+                // Send flush to get all audio
+                setTimeout(() => {
+                    ws.send(JSON.stringify({ type: 'Flush' }));
+                    log('Sent flush command', 'info');
+                }, 100);
+            };
+
+            ws.onmessage = function(event) {
+                if (event.data instanceof ArrayBuffer) {
+                    // Received binary audio data
+                    if (event.data.byteLength > 0) {
+                        audioChunks.push(event.data);
+                        log(`Received chunk ${audioChunks.length} (${event.data.byteLength} bytes)`, 'info');
+
+                        // Clear any existing close timeout
+                        if (closeTimeout) {
+                            clearTimeout(closeTimeout);
+                        }
+
+                        // Reset timeout to wait for more chunks
+                        closeTimeout = setTimeout(() => {
+                            log('All audio received, playing...', 'success');
+                            playCollectedAudio();
+                            if (ws && ws.readyState === WebSocket.OPEN) {
+                                ws.send(JSON.stringify({ type: 'Close' }));
+                                ws.close();
+                            }
+                        }, 500);
+                    }
+                } else {
+                    // Received text message (metadata)
+                    try {
+                        const data = JSON.parse(event.data);
+                        log(`Deepgram: ${data.type}`, 'info');
+
+                        if (data.type === 'Flushed') {
+                            flushed = true;
+                            log(`Flush received after ${audioChunks.length} chunks`, 'success');
+
+                            // If we already have chunks, start the final timeout
+                            if (audioChunks.length > 0) {
+                                if (closeTimeout) {
+                                    clearTimeout(closeTimeout);
+                                }
+                                closeTimeout = setTimeout(() => {
+                                    log('All audio received, playing...', 'success');
+                                    playCollectedAudio();
+                                    if (ws && ws.readyState === WebSocket.OPEN) {
+                                        ws.send(JSON.stringify({ type: 'Close' }));
+                                        ws.close();
+                                    }
+                                }, 500);
+                            }
+                        }
+                    } catch (e) {
+                        log(`Deepgram message: ${event.data}`, 'info');
+                    }
+                }
+            };
+
+            ws.onclose = function() {
+                log('Disconnected from Deepgram', 'info');
+                if (closeTimeout) {
+                    clearTimeout(closeTimeout);
+                }
+                ws = null;
+            };
+
+            ws.onerror = function(error) {
+                log('Deepgram connection error', 'error');
+                console.error('WebSocket error:', error);
+                updateStatus(false);
+            };
+        }
+
+        async function speak() {
+            const text = textInput.value.trim();
+            if (!text) {
+                log('Please enter some text', 'error');
+                return;
+            }
+
+            try {
+                await connectToDeepgram(text);
+            } catch (error) {
+                log(`Error: ${error.message}`, 'error');
+            }
+        }
+
+        function stop() {
+            if (ws) {
+                try {
+                    ws.send(JSON.stringify({ type: 'Close' }));
+                } catch (e) {
+                    // Ignore
+                }
+                ws.close();
+                ws = null;
+            }
+
+            // Stop audio
+            audioElement.pause();
+            audioElement.currentTime = 0;
+
+            audioChunks = [];
+
+            log('Audio stopped', 'info');
+            updateStatus(false);
+        }
+
+        // Enable speak button on Enter key
+        textInput.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' && e.ctrlKey) {
+                e.preventDefault();
+                if (!speakBtn.disabled) {
+                    speak();
+                }
+            }
+        });
+
+        // Initial log
+        log('Ready! Audio will be collected and played once complete', 'info');
+    </script>
+</body>
+</html>
