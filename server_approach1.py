@@ -12,9 +12,7 @@ import logging
 import asyncio
 import os
 from dotenv import load_dotenv
-from deepgram import DeepgramClient
-from deepgram.core.events import EventType
-from deepgram.extensions.types.sockets import SpeakV1SocketClientResponse, SpeakV1TextMessage, SpeakV1ControlMessage
+from deepgram import DeepgramClient, SpeakWebSocketEvents, SpeakWSOptions
 
 # Load environment variables
 load_dotenv()
@@ -70,76 +68,88 @@ async def websocket_endpoint(websocket: WebSocket):
             logger.error(f"Audio sender task error: {e}")
 
     try:
-        # Initialize Deepgram client
-        deepgram = DeepgramClient(api_key=DEEPGRAM_API_KEY)
+        # Initialize Deepgram client (SDK 5.0+ reads API key from environment)
+        deepgram = DeepgramClient()
+        dg_connection = deepgram.speak.websocket.v("1")
 
-        # Connect to Deepgram Speak WebSocket using v5 API
-        async with deepgram.speak.v1.connect(
-            model="aura-asteria-en",
-            encoding="linear16",
-            sample_rate=24000
-        ) as dg_connection:
+        # Event handlers for Deepgram connection
+        def on_open(self, open_event, **kwargs):
+            logger.info("Deepgram connection opened")
 
-            # Event handler for messages from Deepgram
-            def on_message(message: SpeakV1SocketClientResponse) -> None:
-                """Receive audio chunks or metadata from Deepgram"""
-                if isinstance(message, bytes):
-                    # Audio data received
-                    if is_connected:
-                        try:
-                            audio_queue.put_nowait(message)
-                            logger.debug(f"Queued {len(message)} bytes of audio")
-                        except Exception as e:
-                            logger.error(f"Error queuing audio: {e}")
-                else:
-                    # Metadata or control message
-                    msg_type = getattr(message, "type", "Unknown")
-                    logger.info(f"Received {msg_type} event from Deepgram")
-
-            # Register event handlers
-            dg_connection.on(EventType.OPEN, lambda _: logger.info("Deepgram connection opened"))
-            dg_connection.on(EventType.MESSAGE, on_message)
-            dg_connection.on(EventType.CLOSE, lambda _: logger.info("Deepgram connection closed"))
-            dg_connection.on(EventType.ERROR, lambda error: logger.error(f"Deepgram error: {error}"))
-
-            # Start listening to Deepgram
-            await dg_connection.start_listening()
-            logger.info("Deepgram connection started, waiting for text from client...")
-
-            # Start background audio sender task
-            sender_task = asyncio.create_task(audio_sender())
-
-            # Wait for text messages from browser
-            while is_connected:
+        def on_binary_data(self, data, **kwargs):
+            """Receive audio chunks from Deepgram and queue them for sending"""
+            if is_connected:
                 try:
-                    data = await websocket.receive_text()
-                    logger.info(f"Received text from client: {data}")
-
-                    # Send text to Deepgram for TTS
-                    await dg_connection.send_text(SpeakV1TextMessage(text=data))
-                    logger.info("Text sent to Deepgram")
-
-                    # Flush to ensure all audio is sent
-                    await dg_connection.send_control(SpeakV1ControlMessage(type="Flush"))
-
-                except WebSocketDisconnect:
-                    logger.info("Client disconnected")
-                    is_connected = False
-                    break
+                    # Put audio data in queue (non-blocking)
+                    audio_queue.put_nowait(data)
                 except Exception as e:
-                    logger.error(f"Error receiving/processing text: {e}")
-                    is_connected = False
-                    break
+                    logger.error(f"Error queuing audio: {e}")
 
-            # Send close control message to Deepgram
-            await dg_connection.send_control(SpeakV1ControlMessage(type="Close"))
+        def on_metadata(self, metadata, **kwargs):
+            logger.info(f"Deepgram metadata: {metadata}")
 
+        def on_flush(self, flushed, **kwargs):
+            logger.info("Deepgram flush event received")
+
+        def on_close(self, close_event, **kwargs):
+            logger.info("Deepgram connection closed")
+
+        def on_error(self, error, **kwargs):
+            logger.error(f"Deepgram error: {error}")
+
+        # Register event handlers
+        dg_connection.on(SpeakWebSocketEvents.Open, on_open)
+        dg_connection.on(SpeakWebSocketEvents.AudioData, on_binary_data)
+        dg_connection.on(SpeakWebSocketEvents.Metadata, on_metadata)
+        dg_connection.on(SpeakWebSocketEvents.Flushed, on_flush)
+        dg_connection.on(SpeakWebSocketEvents.Close, on_close)
+        dg_connection.on(SpeakWebSocketEvents.Error, on_error)
+
+        # Configure TTS options
+        options = SpeakWSOptions(
+            model="aura-asteria-en",  # Deepgram voice model
+            encoding="linear16",       # Audio encoding format
+            sample_rate=24000          # Sample rate in Hz
+        )
+
+        # Start Deepgram connection
+        if not dg_connection.start(options):
+            logger.error("Failed to start Deepgram connection")
+            await websocket.close()
+            return
+
+        logger.info("Deepgram connection started, waiting for text from client...")
+
+        # Start background audio sender task
+        sender_task = asyncio.create_task(audio_sender())
+
+        # Wait for text messages from browser
+        while True:
+            data = await websocket.receive_text()
+            logger.info(f"Received text from client: {data}")
+
+            # Send text to Deepgram for TTS
+            dg_connection.send_text(data)
+            logger.info("Text sent to Deepgram")
+
+            # Flush to ensure all audio is sent
+            dg_connection.flush()
+
+    except WebSocketDisconnect:
+        logger.info("Client disconnected")
+        is_connected = False
     except Exception as e:
         logger.error(f"Error in websocket_endpoint: {e}")
         is_connected = False
     finally:
         is_connected = False
-        logger.info("WebSocket connection cleanup complete")
+        # Clean up Deepgram connection
+        if dg_connection:
+            try:
+                dg_connection.finish()
+                logger.info("Deepgram connection closed")
+            except Exception as e:
+                logger.error(f"Error closing Deepgram connection: {e}")
 
 
 if __name__ == "__main__":
