@@ -183,7 +183,7 @@
     <div class="container">
         <h1>🎙️ Deepgram TTS Streaming</h1>
         <p class="subtitle">
-            Approach 2: Direct Connection
+            Approach 2: direct connection with a short-lived token
             <span class="badge">BROWSER ↔ DEEPGRAM</span>
         </p>
 
@@ -197,7 +197,7 @@
             <textarea
                 id="textInput"
                 placeholder="Type something here..."
-            >Hello! This is a test of Deepgram's direct text-to-speech streaming. The audio is streaming directly from Deepgram to your browser without going through the Python server.</textarea>
+            >Hello! This is a test of Deepgram's direct text-to-speech streaming. The audio streams directly from Deepgram to your browser. The Python server only minted a short-lived token.</textarea>
         </div>
 
         <div class="button-group">
@@ -212,12 +212,68 @@
     </div>
 
     <script>
-        let ws = null;
-        let audioContext = null;
-        let deepgramToken = null;
-        let audioChunks = [];
+        // Plays linear16 PCM chunks back to back as they arrive.
+        class PcmPlayer {
+            constructor(sampleRate) {
+                this.sampleRate = sampleRate;
+                this.ctx = null;
+                this.nextTime = 0;
+                this.leftover = null;
+            }
 
-        // UI Elements
+            // Call from a click handler (browser autoplay policy).
+            async start() {
+                if (!this.ctx) {
+                    this.ctx = new AudioContext({ sampleRate: this.sampleRate });
+                }
+                if (this.ctx.state === 'suspended') {
+                    await this.ctx.resume();
+                }
+                this.nextTime = this.ctx.currentTime;
+                this.leftover = null;
+            }
+
+            push(arrayBuffer) {
+                if (!this.ctx) return;
+                let bytes = new Uint8Array(arrayBuffer);
+                // A chunk can in principle end mid-sample; carry the odd byte over.
+                if (this.leftover) {
+                    const merged = new Uint8Array(this.leftover.length + bytes.length);
+                    merged.set(this.leftover);
+                    merged.set(bytes, this.leftover.length);
+                    bytes = merged;
+                    this.leftover = null;
+                }
+                if (bytes.length % 2) {
+                    this.leftover = bytes.slice(-1);
+                    bytes = bytes.subarray(0, bytes.length - 1);
+                }
+                const samples = bytes.length / 2;
+                if (!samples) return;
+
+                const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.length);
+                const buffer = this.ctx.createBuffer(1, samples, this.sampleRate);
+                const channel = buffer.getChannelData(0);
+                for (let i = 0; i < samples; i++) {
+                    channel[i] = view.getInt16(i * 2, true) / 32768;
+                }
+
+                const source = this.ctx.createBufferSource();
+                source.buffer = buffer;
+                source.connect(this.ctx.destination);
+                const at = Math.max(this.ctx.currentTime, this.nextTime);
+                source.start(at);
+                this.nextTime = at + buffer.duration;
+            }
+
+            stop() {
+                if (this.ctx) {
+                    this.ctx.close();
+                    this.ctx = null;
+                }
+            }
+        }
+
         const statusIndicator = document.getElementById('statusIndicator');
         const statusText = document.getElementById('statusText');
         const speakBtn = document.getElementById('speakBtn');
@@ -233,265 +289,137 @@
             logs.scrollTop = logs.scrollHeight;
         }
 
-        function updateStatus(connected) {
-            if (connected) {
-                statusIndicator.classList.add('connected');
-                statusText.textContent = 'Connected to Deepgram';
-                speakBtn.disabled = true;
-                stopBtn.disabled = false;
-            } else {
-                statusIndicator.classList.remove('connected');
-                statusText.textContent = 'Disconnected';
-                speakBtn.disabled = false;
-                stopBtn.disabled = true;
-            }
-        }
+        const elapsed = (since) => `${Math.round(performance.now() - since)} ms`;
 
-        async function initAudioContext() {
-            if (!audioContext) {
-                audioContext = new (window.AudioContext || window.webkitAudioContext)({
-                    sampleRate: 24000  // Match Deepgram's sample rate
-                });
-                log('Audio context initialized', 'success');
-            }
-
-            // Resume audio context if suspended (browser autoplay policy)
-            if (audioContext.state === 'suspended') {
-                await audioContext.resume();
-            }
-        }
-
-        function playCollectedAudio() {
-            if (audioChunks.length === 0) {
-                log('No audio data to play', 'error');
-                return;
-            }
-
-            log(`Combining ${audioChunks.length} audio chunks...`, 'info');
-
-            // Combine all PCM chunks
-            const totalLength = audioChunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
-            const combinedPcm = new Uint8Array(totalLength);
-            let offset = 0;
-
-            for (const chunk of audioChunks) {
-                combinedPcm.set(new Uint8Array(chunk), offset);
-                offset += chunk.byteLength;
-            }
-
-            try {
-                // Create audio buffer for the complete audio
-                const audioBuffer = audioContext.createBuffer(
-                    1,  // mono
-                    combinedPcm.length / 2,  // 16-bit = 2 bytes per sample
-                    24000  // sample rate
-                );
-
-                const channelData = audioBuffer.getChannelData(0);
-                const dataView = new DataView(combinedPcm.buffer);
-
-                // Convert 16-bit PCM to float32 [-1, 1]
-                for (let i = 0; i < combinedPcm.length / 2; i++) {
-                    const int16 = dataView.getInt16(i * 2, true);  // little-endian
-                    channelData[i] = int16 / 32768.0;
-                }
-
-                // Create source and play
-                const source = audioContext.createBufferSource();
-                source.buffer = audioBuffer;
-                source.connect(audioContext.destination);
-
-                source.onended = () => {
-                    log('Audio playback complete', 'info');
-                    updateStatus(false);
-                };
-
-                source.start(0);
-                log('Playing complete audio', 'success');
-
-            } catch (error) {
-                log(`Error playing audio: ${error.message}`, 'error');
-            }
-        }
-
-        async function getToken() {
-            try {
-                log('Fetching token from backend...', 'info');
-                const response = await fetch('http://localhost:8001/api/token');
-
-                if (!response.ok) {
-                    throw new Error('Failed to fetch token');
-                }
-
-                const data = await response.json();
-                deepgramToken = data.token;
-                log('Token retrieved successfully', 'success');
-                return deepgramToken;
-
-            } catch (error) {
-                log(`Error fetching token: ${error.message}`, 'error');
-                throw error;
-            }
-        }
-
-        async function connectToDeepgram(text) {
-            if (!deepgramToken) {
-                await getToken();
-            }
-
-            // Reset audio chunks
-            audioChunks = [];
-
-            // Deepgram WebSocket URL with query parameters
-            const url = new URL('wss://api.deepgram.com/v1/speak');
-            url.searchParams.append('model', 'aura-asteria-en');
-            url.searchParams.append('encoding', 'linear16');
-            url.searchParams.append('sample_rate', '24000');
-
-            log('Connecting directly to Deepgram...', 'info');
-            ws = new WebSocket(url.toString(), ['token', deepgramToken]);
-            ws.binaryType = 'arraybuffer';
-
-            let flushed = false;
-            let closeTimeout = null;
-
-            ws.onopen = async function() {
-                log('Connected directly to Deepgram!', 'success');
-                updateStatus(true);
-                await initAudioContext();
-
-                // Send the text to Deepgram
-                const message = JSON.stringify({
-                    type: 'Speak',
-                    text: text
-                });
-                ws.send(message);
-                log(`Sent text to Deepgram: "${text}"`, 'info');
-
-                // Send flush to get all audio
-                setTimeout(() => {
-                    ws.send(JSON.stringify({ type: 'Flush' }));
-                    log('Sent flush command', 'info');
-                }, 100);
-            };
-
-            ws.onmessage = function(event) {
-                if (event.data instanceof ArrayBuffer) {
-                    // Received binary audio data
-                    if (event.data.byteLength > 0) {
-                        audioChunks.push(event.data);
-                        log(`Received chunk ${audioChunks.length} (${event.data.byteLength} bytes)`, 'info');
-
-                        // Clear any existing close timeout
-                        if (closeTimeout) {
-                            clearTimeout(closeTimeout);
-                        }
-
-                        // Reset timeout to wait for more chunks
-                        closeTimeout = setTimeout(() => {
-                            log('All audio received, playing...', 'success');
-                            playCollectedAudio();
-                            if (ws && ws.readyState === WebSocket.OPEN) {
-                                ws.send(JSON.stringify({ type: 'Close' }));
-                                ws.close();
-                            }
-                        }, 500);
-                    }
-                } else {
-                    // Received text message (metadata)
-                    try {
-                        const data = JSON.parse(event.data);
-                        log(`Deepgram: ${data.type}`, 'info');
-
-                        if (data.type === 'Flushed') {
-                            flushed = true;
-                            log(`Flush received after ${audioChunks.length} chunks`, 'success');
-
-                            // If we already have chunks, start the final timeout
-                            if (audioChunks.length > 0) {
-                                if (closeTimeout) {
-                                    clearTimeout(closeTimeout);
-                                }
-                                closeTimeout = setTimeout(() => {
-                                    log('All audio received, playing...', 'success');
-                                    playCollectedAudio();
-                                    if (ws && ws.readyState === WebSocket.OPEN) {
-                                        ws.send(JSON.stringify({ type: 'Close' }));
-                                        ws.close();
-                                    }
-                                }, 500);
-                            }
-                        }
-                    } catch (e) {
-                        log(`Deepgram message: ${event.data}`, 'info');
-                    }
-                }
-            };
-
-            ws.onclose = function() {
-                log('Disconnected from Deepgram', 'info');
-                if (closeTimeout) {
-                    clearTimeout(closeTimeout);
-                }
-                ws = null;
-            };
-
-            ws.onerror = function(error) {
-                log('Deepgram connection error', 'error');
-                console.error('WebSocket error:', error);
-                updateStatus(false);
-            };
-        }        async function speak() {
-            const text = textInput.value.trim();
-            if (!text) {
-                log('Please enter some text', 'error');
-                return;
-            }
-
-            try {
-                await connectToDeepgram(text);
-            } catch (error) {
-                log(`Error: ${error.message}`, 'error');
-            }
-        }
-
-        function stop() {
-            if (ws) {
-                try {
-                    ws.send(JSON.stringify({ type: 'Close' }));
-                } catch (e) {
-                    // Ignore
-                }
-                ws.close();
-                ws = null;
-            }
-
-            // Stop audio context
-            if (audioContext) {
-                audioContext.close().then(() => {
-                    audioContext = null;
-                    log('Audio stopped', 'info');
-                }).catch(() => {
-                    audioContext = null;
-                });
-            }
-
-            audioChunks = [];
-            updateStatus(false);
-        }
-
-        // Enable speak button on Enter key
-        textInput.addEventListener('keydown', function(e) {
-            if (e.key === 'Enter' && e.ctrlKey) {
+        textInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && e.ctrlKey && !speakBtn.disabled) {
                 e.preventDefault();
-                if (!speakBtn.disabled) {
-                    speak();
-                }
+                speak();
             }
         });
 
-        // Initial log
-        log('Ready! Audio will be collected and played once complete', 'info');
+        const SAMPLE_RATE = 24000;
+        // Served by server_approach2.py at http://localhost:8001; also works when opened as a file.
+        const TOKEN_URL = location.protocol.startsWith('http')
+            ? '/api/token'
+            : 'http://localhost:8001/api/token';
+
+        let ws = null;
+        let token = null;  // { value, model, expiresAt }
+
+        // A token only has to be valid when the WebSocket opens, so one token
+        // can be reused for new connections until shortly before it expires.
+        async function getToken() {
+            if (token && Date.now() < token.expiresAt - 5000) return token;
+            const t0 = performance.now();
+            const res = await fetch(TOKEN_URL);
+            const body = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                throw new Error(body.detail || `token request failed (${res.status})`);
+            }
+            token = {
+                value: body.access_token,
+                model: body.model,
+                expiresAt: Date.now() + body.expires_in * 1000,
+            };
+            log(`Minted a ${body.expires_in}s token in ${elapsed(t0)}`, 'success');
+            return token;
+        }
+
+        function setBusy(busy, label) {
+            statusIndicator.classList.toggle('connected', busy);
+            statusText.textContent = label || (busy ? 'Connected to Deepgram' : 'Idle');
+            speakBtn.disabled = busy;
+            stopBtn.disabled = !busy;
+        }
+
+        // Opens a WebSocket straight to Deepgram, speaks `text`, and calls
+        // onAudio for every audio chunk and onDone once Deepgram has flushed.
+        async function speakDirect(text, onAudio, onDone) {
+            let tok;
+            try {
+                tok = await getToken();
+            } catch (e) {
+                log(`Could not get a token: ${e.message}`, 'error');
+                setBusy(false);
+                return;
+            }
+
+            const url = new URL('wss://api.deepgram.com/v1/speak');
+            url.searchParams.set('model', tok.model);
+            url.searchParams.set('encoding', 'linear16');
+            url.searchParams.set('sample_rate', String(SAMPLE_RATE));
+
+            const tConnect = performance.now();
+            let tSend = 0;
+            let chunks = 0;
+            ws = new WebSocket(url, ['bearer', tok.value]);
+            ws.binaryType = 'arraybuffer';
+
+            ws.onopen = () => {
+                log(`Connected to Deepgram in ${elapsed(tConnect)}`, 'success');
+                setBusy(true);
+                tSend = performance.now();
+                ws.send(JSON.stringify({ type: 'Speak', text }));
+                ws.send(JSON.stringify({ type: 'Flush' }));
+            };
+
+            ws.onmessage = (event) => {
+                if (event.data instanceof ArrayBuffer) {
+                    if (chunks++ === 0) log(`First audio ${elapsed(tSend)} after sending text`, 'success');
+                    onAudio(event.data);
+                    return;
+                }
+                const msg = JSON.parse(event.data);
+                if (msg.type === 'Flushed') {
+                    log(`All audio received (${chunks} chunks) in ${elapsed(tSend)}`, 'success');
+                    ws.send(JSON.stringify({ type: 'Close' }));
+                    ws.close();
+                    onDone();
+                } else if (msg.type === 'Warning' || msg.type === 'Error') {
+                    log(`Deepgram ${msg.type}: ${msg.description || event.data}`, 'error');
+                }
+            };
+
+            ws.onerror = () => log('Deepgram connection error (expired or invalid token?)', 'error');
+            ws.onclose = (event) => {
+                if (event.code !== 1000 && event.code !== 1005) {
+                    log(`Connection closed: ${event.code} ${event.reason}`, 'error');
+                }
+                ws = null;
+                setBusy(false);
+            };
+        }
+
+        function closeSocket() {
+            if (ws) {
+                try { ws.send(JSON.stringify({ type: 'Close' })); } catch (e) { /* already closing */ }
+                ws.close();
+                ws = null;
+            }
+        }
+
+        // Mint ahead of the first click so it does not pay the token round trip.
+        getToken().catch((e) => log(`Could not get a token: ${e.message}`, 'error'));
+
+        const player = new PcmPlayer(SAMPLE_RATE);
+
+        async function speak() {
+            const text = textInput.value.trim();
+            if (!text) return;
+            setBusy(true, 'Connecting...');
+            await player.start();  // inside the click handler, for autoplay policy
+            await speakDirect(text, (chunk) => player.push(chunk), () => {});
+        }
+
+        function stop() {
+            closeSocket();
+            player.stop();
+            setBusy(false);
+            log('Stopped', 'info');
+        }
+
+        log('Audio plays as chunks arrive from Deepgram.', 'info');
     </script>
 </body>
 </html>
