@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Deepgram TTS - Approach 2 (WAV blob)</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            padding: 40px;
+            max-width: 600px;
+            width: 100%;
+        }
+
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 28px;
+        }
+
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 14px;
+        }
+
+        .status {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 20px;
+            padding: 12px;
+            background: #f5f5f5;
+            border-radius: 8px;
+        }
+
+        .status-indicator {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #e74c3c;
+            animation: pulse 2s infinite;
+        }
+
+        .status-indicator.connected {
+            background: #2ecc71;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .input-group {
+            margin-bottom: 20px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: #555;
+            font-weight: 600;
+        }
+
+        textarea {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #ddd;
+            border-radius: 8px;
+            font-size: 16px;
+            font-family: inherit;
+            resize: vertical;
+            min-height: 100px;
+            transition: border-color 0.3s;
+        }
+
+        textarea:focus {
+            outline: none;
+            border-color: #43e97b;
+        }
+
+        .button-group {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        button {
+            flex: 1;
+            padding: 14px 20px;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+        }
+
+        button:active {
+            transform: translateY(0);
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%);
+            color: white;
+        }
+
+        .btn-danger {
+            background: #e74c3c;
+            color: white;
+        }
+
+        .logs {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 15px;
+            border-radius: 8px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .log-entry {
+            margin-bottom: 5px;
+            padding: 3px 0;
+        }
+
+        .log-entry.info {
+            color: #4ec9b0;
+        }
+
+        .log-entry.error {
+            color: #f48771;
+        }
+
+        .log-entry.success {
+            color: #89d185;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 600;
+            background: #43e97b;
+            color: white;
+            margin-left: 10px;
+        }
+
+        audio {
+            width: 100%;
+            margin-bottom: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎙️ Deepgram TTS Streaming</h1>
+        <p class="subtitle">
+            Approach 2: direct connection, buffered WAV playback
+            <span class="badge">&lt;audio&gt; + WAV</span>
+        </p>
+
+        <div class="status">
+            <div class="status-indicator" id="statusIndicator"></div>
+            <span id="statusText">Disconnected</span>
+        </div>
+
+        <audio id="audioPlayer" controls></audio>
+
+        <div class="input-group">
+            <label for="textInput">Enter text to convert to speech:</label>
+            <textarea
+                id="textInput"
+                placeholder="Type something here..."
+            >Hello! This page waits for the whole utterance, wraps it in a WAV header, and plays it with an audio element. It is simpler, but playback only starts after the last byte arrives.</textarea>
+        </div>
+
+        <div class="button-group">
+            <button id="speakBtn" class="btn-primary" onclick="speak()">Speak</button>
+            <button id="stopBtn" class="btn-danger" onclick="stop()" disabled>Stop</button>
+        </div>
+
+        <div class="input-group">
+            <label>Activity Log:</label>
+            <div class="logs" id="logs"></div>
+        </div>
+    </div>
+
+    <script>
+        const statusIndicator = document.getElementById('statusIndicator');
+        const statusText = document.getElementById('statusText');
+        const speakBtn = document.getElementById('speakBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const textInput = document.getElementById('textInput');
+        const logs = document.getElementById('logs');
+
+        function log(message, type = 'info') {
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${type}`;
+            entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            logs.appendChild(entry);
+            logs.scrollTop = logs.scrollHeight;
+        }
+
+        const elapsed = (since) => `${Math.round(performance.now() - since)} ms`;
+
+        textInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && e.ctrlKey && !speakBtn.disabled) {
+                e.preventDefault();
+                speak();
+            }
+        });
+
+        const SAMPLE_RATE = 24000;
+        // Served by server_approach2.py at http://localhost:8001; also works when opened as a file.
+        const TOKEN_URL = location.protocol.startsWith('http')
+            ? '/api/token'
+            : 'http://localhost:8001/api/token';
+
+        let ws = null;
+        let token = null;  // { value, model, expiresAt }
+
+        // A token only has to be valid when the WebSocket opens, so one token
+        // can be reused for new connections until shortly before it expires.
+        async function getToken() {
+            if (token && Date.now() < token.expiresAt - 5000) return token;
+            const t0 = performance.now();
+            const res = await fetch(TOKEN_URL);
+            const body = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                throw new Error(body.detail || `token request failed (${res.status})`);
+            }
+            token = {
+                value: body.access_token,
+                model: body.model,
+                expiresAt: Date.now() + body.expires_in * 1000,
+            };
+            log(`Minted a ${body.expires_in}s token in ${elapsed(t0)}`, 'success');
+            return token;
+        }
+
+        function setBusy(busy, label) {
+            statusIndicator.classList.toggle('connected', busy);
+            statusText.textContent = label || (busy ? 'Connected to Deepgram' : 'Idle');
+            speakBtn.disabled = busy;
+            stopBtn.disabled = !busy;
+        }
+
+        // Opens a WebSocket straight to Deepgram, speaks `text`, and calls
+        // onAudio for every audio chunk and onDone once Deepgram has flushed.
+        async function speakDirect(text, onAudio, onDone) {
+            let tok;
+            try {
+                tok = await getToken();
+            } catch (e) {
+                log(`Could not get a token: ${e.message}`, 'error');
+                setBusy(false);
+                return;
+            }
+
+            const url = new URL('wss://api.deepgram.com/v1/speak');
+            url.searchParams.set('model', tok.model);
+            url.searchParams.set('encoding', 'linear16');
+            url.searchParams.set('sample_rate', String(SAMPLE_RATE));
+
+            const tConnect = performance.now();
+            let tSend = 0;
+            let chunks = 0;
+            ws = new WebSocket(url, ['bearer', tok.value]);
+            ws.binaryType = 'arraybuffer';
+
+            ws.onopen = () => {
+                log(`Connected to Deepgram in ${elapsed(tConnect)}`, 'success');
+                setBusy(true);
+                tSend = performance.now();
+                ws.send(JSON.stringify({ type: 'Speak', text }));
+                ws.send(JSON.stringify({ type: 'Flush' }));
+            };
+
+            ws.onmessage = (event) => {
+                if (event.data instanceof ArrayBuffer) {
+                    if (chunks++ === 0) log(`First audio ${elapsed(tSend)} after sending text`, 'success');
+                    onAudio(event.data);
+                    return;
+                }
+                const msg = JSON.parse(event.data);
+                if (msg.type === 'Flushed') {
+                    log(`All audio received (${chunks} chunks) in ${elapsed(tSend)}`, 'success');
+                    ws.send(JSON.stringify({ type: 'Close' }));
+                    ws.close();
+                    onDone();
+                } else if (msg.type === 'Warning' || msg.type === 'Error') {
+                    log(`Deepgram ${msg.type}: ${msg.description || event.data}`, 'error');
+                }
+            };
+
+            ws.onerror = () => log('Deepgram connection error (expired or invalid token?)', 'error');
+            ws.onclose = (event) => {
+                if (event.code !== 1000 && event.code !== 1005) {
+                    log(`Connection closed: ${event.code} ${event.reason}`, 'error');
+                }
+                ws = null;
+                setBusy(false);
+            };
+        }
+
+        function closeSocket() {
+            if (ws) {
+                try { ws.send(JSON.stringify({ type: 'Close' })); } catch (e) { /* already closing */ }
+                ws.close();
+                ws = null;
+            }
+        }
+
+        // Mint ahead of the first click so it does not pay the token round trip.
+        getToken().catch((e) => log(`Could not get a token: ${e.message}`, 'error'));
+
+        const audioElement = document.getElementById('audioPlayer');
+        let chunksForWav = [];
+
+        // Wrap raw linear16 PCM in a 44-byte WAV header so <audio> can play it.
+        function pcmToWav(chunks, sampleRate) {
+            const dataSize = chunks.reduce((sum, c) => sum + c.byteLength, 0);
+            const buffer = new ArrayBuffer(44 + dataSize);
+            const view = new DataView(buffer);
+            const writeString = (offset, s) => {
+                for (let i = 0; i < s.length; i++) view.setUint8(offset + i, s.charCodeAt(i));
+            };
+            writeString(0, 'RIFF');
+            view.setUint32(4, 36 + dataSize, true);
+            writeString(8, 'WAVE');
+            writeString(12, 'fmt ');
+            view.setUint32(16, 16, true);              // fmt chunk size
+            view.setUint16(20, 1, true);               // PCM
+            view.setUint16(22, 1, true);               // mono
+            view.setUint32(24, sampleRate, true);
+            view.setUint32(28, sampleRate * 2, true);  // byte rate
+            view.setUint16(32, 2, true);               // block align
+            view.setUint16(34, 16, true);              // bits per sample
+            writeString(36, 'data');
+            view.setUint32(40, dataSize, true);
+            let offset = 44;
+            for (const c of chunks) {
+                new Uint8Array(buffer, offset).set(new Uint8Array(c));
+                offset += c.byteLength;
+            }
+            return buffer;
+        }
+
+        async function speak() {
+            const text = textInput.value.trim();
+            if (!text) return;
+            chunksForWav = [];
+            setBusy(true, 'Connecting...');
+            await speakDirect(text, (chunk) => chunksForWav.push(chunk), () => {
+                const blob = new Blob([pcmToWav(chunksForWav, SAMPLE_RATE)], { type: 'audio/wav' });
+                if (audioElement.src) URL.revokeObjectURL(audioElement.src);
+                audioElement.src = URL.createObjectURL(blob);
+                audioElement.play().catch((e) => log(`Playback failed: ${e.message}`, 'error'));
+            });
+        }
+
+        function stop() {
+            closeSocket();
+            audioElement.pause();
+            chunksForWav = [];
+            setBusy(false);
+            log('Stopped', 'info');
+        }
+
+        log('Audio is buffered until Deepgram flushes, then played as one WAV file.', 'info');
+    </script>
+</body>
+</html>
