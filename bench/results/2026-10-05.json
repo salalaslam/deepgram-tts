@@ -2,7 +2,7 @@
   "meta": {
     "started_utc": "2026-10-05T02:36:26+00:00",
     "finished_utc": "2026-10-05T02:59:01+00:00",
-    "location": "Gilgit, Gilgit-Baltistan, Pakistan (residential ISP, AS18053 SCO)",
+    "location": "Pakistan (residential connection)",
     "model": "aura-2-thalia-en",
     "runs_per_path_per_text": 20,
     "warmup": 1,

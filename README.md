@@ -57,7 +57,7 @@ There are two pages for this path: `index_approach2.html` plays chunks as they a
 
 Measured on 2026-10-05, 02:36 to 02:59 UTC, with `bench/ttfa.py`: 20 runs per path per text, proxy and direct runs interleaved in random order, one warm-up run per path discarded. Raw data: [`bench/results/2026-10-05.json`](bench/results/2026-10-05.json).
 
-- **Where:** a MacBook (M3 Pro) on a home connection in Gilgit, Pakistan (ISP: SCO, AS18053). Both FastAPI servers ran on the same laptop as the client.
+- **Where:** a MacBook (M3 Pro) on a residential connection in Pakistan. Both FastAPI servers ran on the same laptop as the client.
 - **Deepgram:** `api.deepgram.com`, model `aura-2-thalia-en`, linear16, 24 kHz. DNS handed out 8 different addresses across runs (DNS names seen included `sac1`, `va1` and `md1`, so more than one Deepgram site). Ping round trips to them were about 230 to 310 ms from here.
 - **Client:** Python 3.12 with `websockets` 15. It measures bytes on the wire, not browser playback.
 

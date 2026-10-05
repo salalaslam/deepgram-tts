@@ -10,7 +10,7 @@ playback.
 
 Usage (from the repo root, with .env containing DEEPGRAM_API_KEY):
 
-    python bench/ttfa.py --runs 20 --location "Gilgit, PK"
+    python bench/ttfa.py --runs 20 --location "Pakistan"
 
 By default the script starts both servers itself on 127.0.0.1:8000/8001.
 Raw per-run results are written to bench/results/<date>.json and a markdown
