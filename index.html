@@ -176,7 +176,7 @@
 <body>
     <div class="container">
         <h1>🎙️ Deepgram TTS Streaming</h1>
-        <p class="subtitle">Approach 1: Proxied Audio via Python Backend</p>
+        <p class="subtitle">Approach 1: server proxy (browser &harr; FastAPI &harr; Deepgram)</p>
 
         <div class="status">
             <div class="status-indicator" id="statusIndicator"></div>
@@ -188,7 +188,7 @@
             <textarea
                 id="textInput"
                 placeholder="Type something here..."
-            >Hello! This is a test of Deepgram's text-to-speech streaming API.</textarea>
+            >Hello! This audio travels from Deepgram to the Python server, which relays it to your browser over a second WebSocket.</textarea>
         </div>
 
         <div class="button-group">
@@ -204,16 +204,70 @@
     </div>
 
     <script>
-        let ws = null;
-        let audioContext = null;
-        let audioQueue = [];
-        let isPlaying = false;
-        let nextStartTime = 0;
+        // Plays linear16 PCM chunks back to back as they arrive.
+        class PcmPlayer {
+            constructor(sampleRate) {
+                this.sampleRate = sampleRate;
+                this.ctx = null;
+                this.nextTime = 0;
+                this.leftover = null;
+            }
 
-        // UI Elements
+            // Call from a click handler (browser autoplay policy).
+            async start() {
+                if (!this.ctx) {
+                    this.ctx = new AudioContext({ sampleRate: this.sampleRate });
+                }
+                if (this.ctx.state === 'suspended') {
+                    await this.ctx.resume();
+                }
+                this.nextTime = this.ctx.currentTime;
+                this.leftover = null;
+            }
+
+            push(arrayBuffer) {
+                if (!this.ctx) return;
+                let bytes = new Uint8Array(arrayBuffer);
+                // A chunk can in principle end mid-sample; carry the odd byte over.
+                if (this.leftover) {
+                    const merged = new Uint8Array(this.leftover.length + bytes.length);
+                    merged.set(this.leftover);
+                    merged.set(bytes, this.leftover.length);
+                    bytes = merged;
+                    this.leftover = null;
+                }
+                if (bytes.length % 2) {
+                    this.leftover = bytes.slice(-1);
+                    bytes = bytes.subarray(0, bytes.length - 1);
+                }
+                const samples = bytes.length / 2;
+                if (!samples) return;
+
+                const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.length);
+                const buffer = this.ctx.createBuffer(1, samples, this.sampleRate);
+                const channel = buffer.getChannelData(0);
+                for (let i = 0; i < samples; i++) {
+                    channel[i] = view.getInt16(i * 2, true) / 32768;
+                }
+
+                const source = this.ctx.createBufferSource();
+                source.buffer = buffer;
+                source.connect(this.ctx.destination);
+                const at = Math.max(this.ctx.currentTime, this.nextTime);
+                source.start(at);
+                this.nextTime = at + buffer.duration;
+            }
+
+            stop() {
+                if (this.ctx) {
+                    this.ctx.close();
+                    this.ctx = null;
+                }
+            }
+        }
+
         const statusIndicator = document.getElementById('statusIndicator');
         const statusText = document.getElementById('statusText');
-        const connectBtn = document.getElementById('connectBtn');
         const speakBtn = document.getElementById('speakBtn');
         const stopBtn = document.getElementById('stopBtn');
         const textInput = document.getElementById('textInput');
@@ -227,163 +281,98 @@
             logs.scrollTop = logs.scrollHeight;
         }
 
-        function updateStatus(connected) {
-            if (connected) {
-                statusIndicator.classList.add('connected');
-                statusText.textContent = 'Connected';
-                connectBtn.textContent = 'Disconnect';
-                connectBtn.className = 'btn-secondary';
-                speakBtn.disabled = false;
-            } else {
-                statusIndicator.classList.remove('connected');
-                statusText.textContent = 'Disconnected';
-                connectBtn.textContent = 'Connect';
-                connectBtn.className = 'btn-primary';
-                speakBtn.disabled = true;
-                stopBtn.disabled = true;
-            }
-        }
+        const elapsed = (since) => `${Math.round(performance.now() - since)} ms`;
 
-        async function initAudioContext() {
-            if (!audioContext) {
-                audioContext = new (window.AudioContext || window.webkitAudioContext)({
-                    sampleRate: 24000  // Match Deepgram's sample rate
-                });
-                log('Audio context initialized', 'success');
-            }
-
-            // Resume audio context if suspended (browser autoplay policy)
-            if (audioContext.state === 'suspended') {
-                await audioContext.resume();
-            }
-        }
-
-        function playAudioChunk(audioData) {
-            // Convert binary data to audio buffer
-            const audioBuffer = audioContext.createBuffer(
-                1,  // mono
-                audioData.length / 2,  // 16-bit = 2 bytes per sample
-                24000  // sample rate
-            );
-
-            const channelData = audioBuffer.getChannelData(0);
-            const dataView = new DataView(audioData.buffer);
-
-            // Convert 16-bit PCM to float32 [-1, 1]
-            for (let i = 0; i < audioData.length / 2; i++) {
-                const int16 = dataView.getInt16(i * 2, true);  // little-endian
-                channelData[i] = int16 / 32768.0;
-            }
-
-            // Create source and schedule playback
-            const source = audioContext.createBufferSource();
-            source.buffer = audioBuffer;
-            source.connect(audioContext.destination);
-
-            // Schedule this chunk to play after the previous one
-            const startTime = Math.max(audioContext.currentTime, nextStartTime);
-            source.start(startTime);
-
-            // Update next start time
-            nextStartTime = startTime + audioBuffer.duration;
-
-            log(`Playing audio chunk (${audioData.length} bytes)`, 'info');
-        }
-
-        function connect() {
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                disconnect();
-                return;
-            }
-
-            log('Connecting to server...', 'info');
-            ws = new WebSocket('ws://localhost:8000/ws');
-            ws.binaryType = 'arraybuffer';
-
-            ws.onopen = async function() {
-                log('Connected to server', 'success');
-                updateStatus(true);
-                await initAudioContext();
-            };
-
-            ws.onmessage = function(event) {
-                if (event.data instanceof ArrayBuffer) {
-                    // Received binary audio data
-                    const audioData = new Uint8Array(event.data);
-                    playAudioChunk(audioData);
-                } else {
-                    // Received text message
-                    log(`Server: ${event.data}`, 'info');
-                }
-            };
-
-            ws.onclose = function() {
-                log('Disconnected from server', 'error');
-                updateStatus(false);
-                ws = null;
-            };
-
-            ws.onerror = function(error) {
-                log('WebSocket error occurred', 'error');
-                console.error('WebSocket error:', error);
-            };
-        }
-
-        function disconnect() {
-            if (ws) {
-                ws.close();
-                ws = null;
-            }
-            stop();
-        }
-
-        function speak() {
-            if (!ws || ws.readyState !== WebSocket.OPEN) {
-                log('Not connected to server', 'error');
-                return;
-            }
-
-            const text = textInput.value.trim();
-            if (!text) {
-                log('Please enter some text', 'error');
-                return;
-            }
-
-            log(`Sending text: "${text}"`, 'info');
-            ws.send(text);
-
-            speakBtn.disabled = true;
-            stopBtn.disabled = false;
-
-            // Reset audio timing
-            nextStartTime = audioContext.currentTime;
-        }
-
-        function stop() {
-            if (audioContext) {
-                // Stop all audio by closing and recreating the context
-                audioContext.close();
-                audioContext = null;
-                nextStartTime = 0;
-                log('Audio stopped', 'info');
-            }
-
-            speakBtn.disabled = false;
-            stopBtn.disabled = true;
-        }
-
-        // Enable speak button on Enter key
-        textInput.addEventListener('keydown', function(e) {
-            if (e.key === 'Enter' && e.ctrlKey) {
+        textInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && e.ctrlKey && !speakBtn.disabled) {
                 e.preventDefault();
-                if (!speakBtn.disabled) {
-                    speak();
-                }
+                speak();
             }
         });
 
-        // Initial log
-        log('Ready to connect', 'info');
+        const SAMPLE_RATE = 24000;
+        // Served by server_approach1.py at http://localhost:8000; also works when opened as a file.
+        const WS_URL = location.protocol.startsWith('http')
+            ? `ws://${location.host}/ws`
+            : 'ws://localhost:8000/ws';
+
+        const connectBtn = document.getElementById('connectBtn');
+        const player = new PcmPlayer(SAMPLE_RATE);
+        let ws = null;
+        let tSend = 0;
+        let chunks = 0;
+
+        function updateStatus(state) {
+            const ready = state === 'ready';
+            statusIndicator.classList.toggle('connected', ready);
+            statusText.textContent = { ready: 'Connected (proxy and Deepgram)', connecting: 'Connecting...', closed: 'Disconnected' }[state];
+            connectBtn.textContent = state === 'closed' ? 'Connect' : 'Disconnect';
+            connectBtn.className = state === 'closed' ? 'btn-primary' : 'btn-secondary';
+            speakBtn.disabled = !ready;
+            stopBtn.disabled = true;
+        }
+
+        function connect() {
+            if (ws) {
+                ws.close();
+                return;
+            }
+            const t0 = performance.now();
+            log(`Connecting to ${WS_URL}...`, 'info');
+            updateStatus('connecting');
+            ws = new WebSocket(WS_URL);
+            ws.binaryType = 'arraybuffer';
+
+            ws.onmessage = (event) => {
+                if (event.data instanceof ArrayBuffer) {
+                    if (chunks++ === 0) log(`First audio ${elapsed(tSend)} after sending text`, 'success');
+                    player.push(event.data);
+                    return;
+                }
+                const msg = JSON.parse(event.data);
+                if (msg.type === 'Ready') {
+                    // The server opens its Deepgram connection before replying.
+                    log(`Proxy and Deepgram connected in ${elapsed(t0)}`, 'success');
+                    updateStatus('ready');
+                } else if (msg.type === 'Flushed') {
+                    log(`All audio received (${chunks} chunks) in ${elapsed(tSend)}`, 'success');
+                    speakBtn.disabled = false;
+                    stopBtn.disabled = true;
+                } else if (msg.type === 'Error') {
+                    log(`Server: ${msg.message}`, 'error');
+                }
+            };
+
+            ws.onclose = () => {
+                log('Disconnected', 'info');
+                ws = null;
+                player.stop();
+                updateStatus('closed');
+            };
+
+            ws.onerror = () => log('WebSocket error (is server_approach1.py running?)', 'error');
+        }
+
+        async function speak() {
+            const text = textInput.value.trim();
+            if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
+            await player.start();
+            chunks = 0;
+            tSend = performance.now();
+            ws.send(text);
+            log(`Sent ${text.length} characters`, 'info');
+            speakBtn.disabled = true;
+            stopBtn.disabled = false;
+        }
+
+        function stop() {
+            // Stops local playback. Audio already requested still arrives and is dropped.
+            player.stop();
+            log('Playback stopped', 'info');
+            stopBtn.disabled = true;
+        }
+
+        log('Click Connect, then Speak. Audio plays as chunks arrive.', 'info');
     </script>
 </body>
 </html>
